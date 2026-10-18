@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import NoReturn
 
 PLUGIN_NAME = "Zcode-Status-TypeBar"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 PLUGIN_FILES = ("inject-main.cjs", "overlay.js", "zusage.py", "usage_mcp.py")
 INJECT_MARKER = "[zusage] load failed"
 

@@ -92,7 +92,7 @@ def main():
                         "protocolVersion", PROTOCOL_VERSION
                     ),
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "Zcode-Status-TypeBar", "version": "1.0.0"},
+                    "serverInfo": {"name": "Zcode-Status-TypeBar", "version": "1.1.0"},
                 },
             )
         elif method == "tools/list":
