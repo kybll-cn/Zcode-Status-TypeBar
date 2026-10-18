@@ -615,7 +615,10 @@ def _session_snapshot(con, sid, cfg):
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at, started_at
+                  output_tokens, first_token_at, started_at,
+                  coalesce(input_tokens,0) as input_n,
+                  coalesce(cache_read_input_tokens,0) as cache_read_n,
+                  coalesce(cache_creation_input_tokens,0) as cache_write_n
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
@@ -738,6 +741,11 @@ def _session_snapshot(con, sid, cfg):
             "model": last["model_id"] if last else "",
             "tps": tps,
             "tps_gen": tps_gen,
+            # 最近一次请求的缓存命中：cache_read ÷ input。命中率高说明这段上下文
+            # 服务端已有副本、不用重算，是首字延迟能压住的关键原因之一。
+            "cache_read": last["cache_read_n"] if last else 0,
+            "input": last["input_n"] if last else 0,
+            "cache_write": last["cache_write_n"] if last else 0,
         },
         # 代码变更统计（session 表 summary_* 列，ZCode 目前未填充、全库为 NULL，有值才会显示）
         "code": {
@@ -927,7 +935,8 @@ def snapshot(force_sid=""):
                     "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
                     "err": {"turns": 0, "tools": 0, "retries": 0, "total": 0},
                     "last_turn": dict(_EMPTY_TURN),
-                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0, "tps_gen": 0},
+                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0, "tps_gen": 0,
+                              "cache_read": 0, "input": 0, "cache_write": 0},
                     "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
                     "tools": {"total": 0, "errors": 0, "list": []},
                     "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,

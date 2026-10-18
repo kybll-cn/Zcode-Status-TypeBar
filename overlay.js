@@ -189,13 +189,14 @@
       ".zu-main{overflow:hidden;min-width:0;flex:0 1 auto;display:flex;align-items:center;gap:1px}" +
       /* zu-main 不得带 .it class：querySelectorAll('.it') 收集 tooltip 时会把它算进第 0 位，
        * tips 全部错位一位且末项为 null —— v31"悬停只有空胶囊/内容错位"的根因 */
-      ".it{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:6px;" +
+      ".it{display:flex;align-items:center;gap:3px;padding:2px 5px;border-radius:6px;" +
       "transition:background-color .12s ease-out}" +
       ".it:hover{background:var(--color-hover,rgba(255,255,255,.06))}" +
-      ".sep{width:1px;height:15px;background:var(--color-border,rgba(255,255,255,.09));flex:0 0 auto;margin:0 1px}" +
-      /* 项内分隔（同一项里的两个数值，如「速度 | 首字」「token | 轮数 | 工具」）：
-         比项间分隔更矮更淡，避免整条看着像被切成很多段。 */
-      ".sepv{width:1px;height:10px;background:var(--color-border,rgba(255,255,255,.07));flex:0 0 auto;margin:0 6px;opacity:.75}" +
+      ".sep{width:1px;height:14px;background:var(--color-border,rgba(255,255,255,.09));flex:0 0 auto;margin:0 1px}" +
+      /* 项内分隔（同一项里的多个数值，如「速度|首字|缓存」「token|轮数|工具」）：
+         比项间分隔更矮更淡，且左右留白更小 —— 项内有 2~3 条竖线，留白一放大
+         整条就被撑宽，压缩尺寸的主要收益就在这里。 */
+      ".sepv{width:1px;height:9px;background:var(--color-border,rgba(255,255,255,.07));flex:0 0 auto;margin:0 4px;opacity:.75}" +
       ".k{color:#7e8899}.v{color:var(--color-foreground,#e9edf4);font-weight:600}" +
       ".pct{font-weight:700}.dim{color:var(--color-foreground-subtle,#667082)}" +
       /* 三档状态色刻意不走客户端变量（v58.1）：terminal-bright-* 是语法高亮色板，
@@ -209,9 +210,9 @@
       "transition:background-color .12s ease-out,color .12s ease-out}" +
       ".btn:hover{color:var(--color-foreground,#e9edf4);background:var(--color-hover,rgba(255,255,255,.07))}" +
       ".btn:active{transform:scale(.96)}" +
-      ".zu-gear{flex:0 0 auto;font-size:17px;border-radius:6px}" +
+      ".zu-gear{flex:0 0 auto;font-size:15px;border-radius:6px}" +
       /* 行内 SVG 线性图标（v54）：currentColor 跟随文字色，一处定义全局换色 */
-      ".ico{width:12px;height:12px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
+      ".ico{width:11px;height:11px;flex:0 0 auto;color:var(--color-foreground-subtle,#7e8899);opacity:.85}" +
       /* 工具错误数徽标 */
       ".eb{background:rgba(255,107,87,.14);background:color-mix(in srgb,var(--color-destructive,#ff6b57) 14%,transparent);" +
       "color:var(--color-destructive,#ff8a73);border-radius:999px;padding:0 6px;line-height:16px;font-weight:600;display:inline-flex;align-items:center;gap:2px}" +
@@ -219,7 +220,7 @@
       /* 上下文微进度条：量感一眼可读，填充色随占比三档。
        * 填充块 background:currentColor —— 三档色类只给 color，填充靠 currentColor 着色
        * （v28 只写了 height 没写背景，填充块全透明 = "空条"根因）。 */
-      ".cbar{display:inline-block;width:46px;height:5px;border-radius:999px;" +
+      ".cbar{display:inline-block;width:38px;height:4px;border-radius:999px;" +
       "background:var(--color-hover,rgba(255,255,255,.1));overflow:hidden;flex:0 0 auto}" +
       ".cbar>i{display:block;height:100%;border-radius:999px;background:currentColor}" +
       /* 子代理运行中呼吸灯 */
@@ -513,24 +514,37 @@
             : L("若这是 SSH 远程 / 他机会话：在 config.json 配置 remote 段即可（README「SSH 远程会话支持」；ssh 也可写成 argv 数组，docker exec / wsl / kubectl exec 等通道都能借道）",
                 "If this is an SSH/remote session, add the remote section to config.json (see README; ssh may also be an argv array, so docker exec / wsl / kubectl exec all work)")));
       }
-      if (state.show.speed && (last.tps || last.ttft_ms)) {
-        /* 第 1 项：速度 + 首字。速度为端到端口径（输出 tokens ÷ 请求总耗时，含首字等待
-         * 与工具往返），反映真实等待体感；纯生成速度放在悬停里对照，避免单看一个数字误判。
-         * 阈值按端到端口径下调：端到端数值本就比纯生成小，用旧的 70/40 会一律显示红色。 */
+      if (state.show.speed && (last.tps || last.ttft_ms || last.cache_read)) {
+        /* 第 1 项：速度 | 首字 | 缓存命中。三者同属"这一次请求快不快"的因果链：
+         * 缓存命中多少 → 要重算多少上下文 → 首字等多久 → 端到端速度多少。
+         * 并排比拆成三项更容易看出瓶颈：命中率高但首字仍长，多半是上下文本身太大。 */
         var tpsCls = !last.tps ? "dim" : last.tps >= 50 ? "ok" : last.tps >= 25 ? "warm" : "hot";
+        var inTok = last.input || 0, cacheTok = last.cache_read || 0;
+        var cacheRatio = inTok > 0 ? cacheTok / inTok * 100 : 0;
+        var cacheCls = cacheRatio >= 90 ? "ok" : cacheRatio >= 60 ? "warm" : "hot";
         it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
           (last.tps ? '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>'
                     : '<span class="dim">–</span>') +
           '<span class="sepv"></span>' +
           '<span class="dim">' + L("首字", "TTFT") + "</span>" +
-          '<span class="' + (last.ttft_ms ? "v" : "dim") + '">' + sec(last.ttft_ms) + "</span>",
+          '<span class="' + (last.ttft_ms ? "v" : "dim") + '">' + sec(last.ttft_ms) + "</span>" +
+          '<span class="sepv"></span>' +
+          ico('<path d="M4 7h16M4 12h16M4 17h16"/>') +
+          '<span class="' + (inTok > 0 ? cacheCls : "dim") + '">' +
+          (inTok > 0 ? cacheRatio.toFixed(0) + "%" : "–") + "</span>",
           L("速度：最近完成请求的输出 tokens ÷ 该请求总耗时（含首字等待与工具往返）",
             "Speed: output tokens ÷ total time of the latest completed request (including first-token wait and tool round-trips)") + "\n" +
           L("纯生成速度 ", "Pure generation speed ") + (last.tps_gen || "–") + " t/s" +
           L("（首 token 之后到完成）", " (first token to completion)") + "\n" +
-          L("首字：", "First token: ") + sec(last.ttft_ms) + L(" · 单次耗时 ", " · Single request ") + sec(last.duration_ms) +
+          L("首字：", "First token: ") + sec(last.ttft_ms) + L(" · 单次耗时 ", " · Single request ") + sec(last.duration_ms) + "\n" +
+          L("缓存命中 ", "Cache hit ") + fmt(cacheTok) + " / " + fmt(inTok) +
+          (inTok > 0 ? "（" + cacheRatio.toFixed(1) + "%）" : "") +
+          L("。命中率高说明这段上下文服务端已有副本、无需重算，是首字延迟能压住的主要原因。",
+            ". A high hit rate means the context already exists server-side and is not recomputed, the main reason the first-token delay stays low.") +
+          (last.cache_write ? "\n" + L("本次写入缓存 ", "Cache written this request ") + fmt(last.cache_write) : "") +
           (last.model ? "\n" + L("模型：", "Model: ") + last.model : "") +
-          "\n" + L("≥50 t/s 绿 · 25–50 黄 · <25 红（端到端口径）", "≥50 t/s green · 25–50 yellow · <25 red (end-to-end)"));
+          "\n" + L("速度 ≥50 t/s 绿 · 25–50 黄 · <25 红；缓存 ≥90% 绿 · 60–90% 黄 · <60% 红",
+                  "Speed ≥50 t/s green · 25–50 yellow · <25 red; cache ≥90% green · 60–90% yellow · <60% red"));
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
