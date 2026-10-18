@@ -1,4 +1,4 @@
-/* ZCode token 用量状态条 v58（渲染进程注入，自包含 IIFE）。
+/* ZCode token 用量状态条 v64（渲染进程注入，自包含 IIFE）。
  * 形态：输入框视觉卡片正下方的悬浮胶囊条 —— 给卡片加 margin-bottom 上移让位，
  *       条 fixed 悬浮在卡片边框外、窗口底边上的空带里，rAF 每帧跟随，水平居中于卡片。
  *       （条不能放在输入框中心点所在矩形内：命中检测自遮挡 = 周期性闪烁，v12-v14 实测。）
@@ -10,6 +10,10 @@
  * 主题（v58）：配色全量跟随客户端主题 —— 颜色一律 var(--color-*, 兜底值) 引用客户端语义
  *       变量（<html> 的 .dark 类翻转整套值，zai-light/zai-dark 特殊主题同样适配），
  *       MutationObserver 观察该类同步 .zu-light（仅剩阴影/光晕程度性差异）。
+ * 指标（v64）：第一项口径重定 —— 速度改为"纯生成速度"（只算模型吐字的时间窗，
+ *       与 CLI agent 的 tok/s 同口径，旧端到端口径因摊入首字等待与工具往返而低 2~13 倍）；
+ *       首字改为 turn 级（你发消息→第一个字，含客户端准备段，悬停里拆开显示）；
+ *       停滞时照常显示上一轮并标注相对时间（"5分钟前"），不再退化成零值/隐藏。
  * 数据：主进程泵推 window.__zusageUpdate；显示项可在 ⚙ 面板配置（localStorage 持久化）。
  * 分屏（v61.1）：协调器每 600ms 扫描可见输入框，按 pane（data-pane-id）派发实例——
  *       一个 pane 一条，各自显示 composer 祖先链 data-session-id 指向的会话；
@@ -159,7 +163,7 @@
   /* ---------- 实例工厂（v61.1）：一个 pane 一套 条/面板/气泡/tooltip/定位循环。
    * slot 0 保留 #zusage-bar/#zusage-tip 兼容 id（泵热更新按它清理），其余实例仅类名。 */
   function spawnInstance(pid, slot) {
-    var VERSION = "v63";   // v63：条水平居中于输入框卡片（原贴左缘定位）；v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
+    var VERSION = "v64";   // v64：速度改纯生成口径（与 CLI agent 的 tok/s 一致）+ 首字加档位色 + 停滞时保留上一轮并标注相对时间；v63：条水平居中于输入框卡片（原贴左缘定位）；v62：模态弹窗（模型配置等）打开时整体收起 + 弹窗内编辑框不再被当输入框（issue #9）；零值会话的来源提示（issue #14）   // 随提交递增（悬停 ⚙ 面板可见）；未提交的中间迭代不涨号
     /* ---------- 状态（实例级） ---------- */
     var excOn = false,    // 本 pane 会话处于"上下文超限被拒"状态（render 时按 picked 会话计算）
       excGone = false,    // 用户点 ✕ 关闭了本次气泡；超限解除后自动复位
@@ -198,6 +202,12 @@
          整条就被撑宽，压缩尺寸的主要收益就在这里。 */
       ".sepv{width:1px;height:9px;background:var(--color-border,rgba(255,255,255,.07));flex:0 0 auto;margin:0 4px;opacity:.75}" +
       ".k{color:#7e8899}.v{color:var(--color-foreground,#e9edf4);font-weight:600}" +
+      /* 速度主数字（v64）：整条里信息密度最高的一项，比普通数值再加一档字重，
+       * 与紧随其后的单位 t/s（dim 小字）拉开层次。 */
+      ".spd{font-weight:700}" +
+      /* 停滞标注（v64）：本轮结束超过 STALE 窗口后追加的相对时间（"5分钟前"），
+       * 提示条面数字是上一轮而非实时 —— 弱化但不隐藏，与 .dim 同一族但更收敛。 */
+      ".ago{color:var(--color-foreground-subtle,#667082);opacity:.85;font-size:12px}" +
       ".pct{font-weight:700}.dim{color:var(--color-foreground-subtle,#667082)}" +
       /* 三档状态色刻意不走客户端变量（v58.1）：terminal-bright-* 是语法高亮色板，
        * 绿档在条面小字号/细进度条上发白（用户实测）；改用高对比自调档，
@@ -323,7 +333,7 @@
       panel.innerHTML =
       '<div class="phead">⚙ ' + L("状态条设置", "Status bar settings") + '<span class="pver">' + VERSION + '</span></div>' +
       '<div class="cap">' + L("显示项（条面）", "Display items (bar)") + '</div>' +
-      '<label><input type="checkbox" data-k="speed"><span>' + L("速度 · 首字 · 缓存", "Speed · TTFT · Cache") + '<em>' + L("最近一次请求的速度、首字延迟与缓存命中", "speed, first-token latency and cache hit of the latest request") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="speed"><span>' + L("速度 · 首字 · 缓存", "Speed · TTFT · Cache") + '<em>' + L("本轮生成速度、首字延迟与缓存命中；停滞时保留上一轮并标注时间", "this turn's generation speed, first-token latency and cache hit; kept and time-stamped when idle") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="ctx"><span>' + L("上下文", "Context") + '<em>' + L("进度条 + 百分比，颜色随占比变化", "progress bar + percentage, color by usage") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 工具调用", "session tokens / turns / tool calls") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="err"><span>' + L("会话错误", "Session errors") + '<em>' + L("轮次报错 / 工具失败 / 重试，不含主动中断", "failed turns / tool failures / retries, excluding cancellations") + '</em></span></label>' +
@@ -455,6 +465,18 @@
       return String(n);
     }
     function sec(ms) { return ms ? (ms / 1000).toFixed(1) + "s" : "–"; }
+    /* 相对时间（停滞标注用）：aim 是"这个数字是多久之前的"，只用于 >STALE 的场景，
+     * 所以最细粒度给到分钟；中英文各自习惯写法（5分钟前 / 5m ago）。 */
+    function relAgo(ms) {
+      var m = Math.floor(ms / 60000);
+      if (m < 60) return L(m + "分钟前", m + "m ago");
+      var h = Math.floor(m / 60);
+      if (h < 24) return L(h + "小时前", h + "h ago");
+      return L(Math.floor(h / 24) + "天前", Math.floor(h / 24) + "d ago");
+    }
+    /* 停滞阈值：与 zusage.py 的 STALE_MS 同值（前端再判一次是为了容忍旧版后端
+     * 未返回 last.stale 的情况——此时按 ago_ms 自行判定，行为一致）。 */
+    var STALE_UI_MS = 2 * 60 * 1000;
 
     /* 超限判定：最近一次"上下文超限被拒"晚于最近成功请求 = 仍处于超限状态（该请求
      * status=error，不进任何 completed 统计，只能这样单独检测）。html() 与气泡共用。 */
@@ -514,39 +536,76 @@
             : L("若这是 SSH 远程 / 他机会话：在 config.json 配置 remote 段即可（README「SSH 远程会话支持」；ssh 也可写成 argv 数组，docker exec / wsl / kubectl exec 等通道都能借道）",
                 "If this is an SSH/remote session, add the remote section to config.json (see README; ssh may also be an argv array, so docker exec / wsl / kubectl exec all work)")));
       }
-      if (state.show.speed && (last.tps || last.ttft_ms || last.input)) {
-        /* 第 1 项：速度 | 首字 | 缓存命中。三者同属"这一次请求快不快"的因果链：
-         * 缓存命中多少 → 要重算多少上下文 → 首字等多久 → 端到端速度多少。
-         * 并排比拆成三项更容易看出瓶颈：命中率正常但首字仍长，多半是上下文本身太大。 */
-        var tpsCls = !last.tps ? "dim" : last.tps >= 50 ? "ok" : last.tps >= 25 ? "warm" : "hot";
-        /* 缓存命中率 = cache_read ÷ input，保留两位小数。
-         * 小数位不够就会显示成假的 100%：实测连续对话里命中率在 99.2~99.98% 之间，
-         * 99.968% 用 toFixed(0) 和 toFixed(1) 都会变成 "100%" / "100.0%"。
-         * 而命中 100% 在物理上不可能 —— 每一轮总有新增内容没进缓存。那个假的完美
-         * 数字只会让人以为算错了。两位小数既如实反映真实值（99.97%），也看得出
-         * 缓存效果好坏：冷启动会掉到个位数甚至 0%，那才是真出问题。 */
+      if (state.show.speed) {
+        /* 第 1 项：速度 | 首字 | 缓存命中（v64 口径重定）。
+         * 速度 = 本轮纯生成速度：sum(输出) ÷ sum(首个 token → 完成) 时长，只累加模型
+         *   真正吐字的时间窗，剔除首字等待与工具往返 —— 与 Claude Code 等 CLI agent
+         *   的 tok/s 同口径。旧口径（输出 ÷ 请求总耗时）把 20+ 秒首字等待和几十次工具
+         *   往返全摊进分母，实测同一轮低 2~13 倍（端到端 11 t/s vs 真实生成 151 t/s），
+         *   看着像模型很慢，其实是等了半分钟的输入与工具。
+         * 首字 = 从你发消息到屏幕上第一个字（turn 级，含客户端准备段）；悬停里拆成
+         *   "模型首包 + 客户端准备"两段，便于分辨慢在服务端还是本地。
+         * 三者是同一个因果链：缓存命中多少 → 要重算多少 → 首字等多久 → 吐字多快。 */
         var inTok = last.input || 0, freshTok = last.cache_fresh || 0;
-        /* 局部变量不能叫 cachePct —— 同作用域已有一个同名辅助函数（会话/本轮的缓存
-         * 命中率徽标），局部变量会遮蔽它，后面 cachePct(...) 调用会抛 TypeError，
-         * 整个 html() 崩掉、状态条整条消失（不是某一项不显示）。 */
+        /* 局部变量不能叫 cachePct —— 同作用域已有同名辅助函数，遮蔽会让后面的
+         * cachePct(...) 调用抛 TypeError、html() 整个崩掉（状态条整条消失，v31 事故）。 */
         var cachePctVal = inTok > 0 ? (inTok - freshTok) / inTok * 100 : 0;
         var cacheCls = cachePctVal >= 90 ? "ok" : cachePctVal >= 50 ? "warm" : "hot";
-        it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
-          (last.tps ? '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>'
-                    : '<span class="dim">–</span>') +
-          '<span class="sepv"></span>' +
-          '<span class="dim">' + L("首字", "TTFT") + "</span>" +
-          '<span class="' + (last.ttft_ms ? "v" : "dim") + '">' + sec(last.ttft_ms) + "</span>" +
-          '<span class="sepv"></span>' +
-          ico('<path d="M12 5v14M5 12h14"/>') +
-          '<span class="' + (inTok > 0 ? cacheCls : "dim") + '">' +
-          (inTok > 0 ? cachePctVal.toFixed(2) + "%" : "–") + "</span>",
-          L("速度：最近完成请求的输出 tokens ÷ 该请求总耗时（含首字等待与工具往返）",
-            "Speed: output tokens ÷ total time of the latest completed request (including first-token wait and tool round-trips)") + "\n" +
-          L("纯生成速度 ", "Pure generation speed ") + (last.tps_gen || "–") + " t/s" +
-          L("（首 token 之后到完成）", " (first token to completion)") + "\n" +
-          L("首字：", "First token: ") + sec(last.ttft_ms) + L(" · 单次耗时 ", " · Single request ") + sec(last.duration_ms) + "\n" +
-          L("缓存：命中 ", "Cache: hit ") + fmt(last.cache_read) + " / " + fmt(last.input) +
+        /* 速度取值：本轮加权（最稳，覆盖率 85~97%）→ 末次请求 → 端到端（本轮全部
+         * 请求都缺首字时间戳时的兜底，悬停里注明口径不同，别让它冒充生成速度）。 */
+        var spd = last.tps_gen || last.tps_last || 0;
+        var spdE2E = !spd && last.tps > 0;
+        var spdVal = spd || last.tps || 0;
+        var spdCls = !spdVal ? "dim" : spdVal >= 100 ? "ok" : spdVal >= 50 ? "warm" : "hot";
+        var ttftCls = !last.ttft_ms ? "dim" : last.ttft_ms <= 5000 ? "ok"
+          : last.ttft_ms <= 15000 ? "warm" : "hot";
+        /* 停滞/上一轮标注（v64）：两种信号任一成立就标注 —— 后端判定（last.stale：本轮
+         * 完成超 2 分钟无新请求）或 mine_idle（客户端已清空焦点会话 = 当前没有进行中的
+         * 任务）。数字照常显示（停滞时看的就是上一轮），标注只说数据有多旧，不隐藏任何项。
+         * 时间优先用后端给的绝对时刻 last.at 现算（而非随 payload 冻结的 ago_ms）：
+         * db 无新写入时 payload 不刷新，ago_ms 会停住，绝对时刻 + track 的定期重渲染
+         * 才能让"5分钟前 → 8分钟前"自己走。旧后端没有 at 时退回 ago_ms。
+         * 刚完成不足 1 分钟时给"上轮"二字：精确到分钟反而显示"0分钟前"，没意义。 */
+        var agoMs = last.at ? Math.max(0, Date.now() - last.at) : (last.ago_ms || 0);
+        var agoTxt = (d.mine_idle || last.stale || agoMs > STALE_UI_MS)
+          ? (agoMs >= 60000 ? relAgo(agoMs) : L("上轮", "prev")) : "";
+        /* 数据为空（全新会话没发过消息）时悬停给一句说明，而不是一排 0 加口径长文 */
+        var hasData = !!(spdVal || last.ttft_ms || last.input || agoMs);
+        var tipTxt;
+        if (!hasData) {
+          tipTxt = L("本会话还没有已完成的请求。发出第一条消息、模型开始回答后，"
+            + "这里会显示生成速度 / 首字延迟 / 缓存命中。",
+            "No completed requests in this session yet. Once you send a message and the model answers, "
+            + "generation speed / first-token latency / cache hit will show up here.");
+        } else {
+          tipTxt = L("速度：本轮纯生成速度 = 输出 tokens ÷ 生成时长（首个 token 到完成）。",
+            "Speed: pure generation speed of this turn = output tokens ÷ time from first token to completion.") + "\n" +
+          L("只算模型真正吐字的时间窗，首字等待与工具往返不计入 —— 与 Claude Code 等 CLI 的 tok/s 同口径。",
+            "Only the time the model actually spends emitting tokens counts; first-token wait and tool round-trips are excluded — the same convention CLI agents like Claude Code use for tok/s.") +
+          ((last.gen_req && last.gen_cov) ? "\n" + L(
+            "本轮 " + (lt.requests || 0) + " 次请求 · " + last.gen_req + " 次可算（覆盖 "
+              + Math.round(last.gen_cov * 100) + "% 输出；网关对部分小请求不记首字时间戳）",
+            "This turn: " + (lt.requests || 0) + " requests · " + last.gen_req + " measurable ("
+              + Math.round(last.gen_cov * 100) + "% of output; the gateway omits first-token timestamps on some small requests)") : "") +
+          (spdE2E ? "\n" + L("（本轮暂缺首字时间戳，显示的是端到端口径：输出 ÷ 请求总耗时）",
+                             "(no first-token timestamps this turn — showing end-to-end: output ÷ total request time)") : "") +
+          "\n" + L("对照：端到端（含首字等待与工具往返）", "For reference — end-to-end (incl. first-token wait and tool round-trips) ")
+          + (last.tps_e2e || last.tps || "–") + " t/s"
+          + (last.tps_last && last.tps_gen ? L(" · 末次请求 ", " · Last request ") + last.tps_last + " t/s" : "") +
+          (last.turn_out ? L(" · 本轮输出 ", " · Turn output ") + fmt(last.turn_out) + L(" 字", " tokens")
+            + (last.turn_ms ? L(" / 总耗时 ", " / total ") + sec(last.turn_ms) : "") : "") +
+          "\n" + L("首字：从你发消息到屏幕上第一个字。",
+                   "TTFT: from sending your message to the first character on screen.") +
+          (last.client_ms ? " " + L("模型首包 ", "model first packet ") + sec(last.api_ttft_ms)
+            + L(" + 客户端准备 ", " + client prep ") + sec(last.client_ms)
+            + L("（读文件/拼上下文等）", " (reading files, assembling context, etc.)") : "") +
+          (last.ttft_partial ? "\n" + L("（本轮进行中：turn 级数据还没落库，显示的是模型首包近似值）",
+                                        "(turn in progress: turn-level row not written yet; showing the model-first-packet approximation)") : "") +
+          (agoMs ? "\n" + L("上一轮完成于 ", "Last turn completed ") + relAgo(agoMs)
+            + "（" + fmtTime(Date.now() - agoMs) + "）"
+            + (d.mine_idle ? L("，窗口当前没有进行中的任务 —— 显示的是这个会话的上一轮",
+                               "; no task is running in this window — showing this session's previous turn") : "") : "") +
+          "\n" + L("缓存：命中 ", "Cache: hit ") + fmt(last.cache_read) + " / " + fmt(last.input) +
           (inTok > 0 ? "（" + cachePctVal.toFixed(2) + "%）" : "") +
           L("。连续对话里上下文大部分已在服务端，命中率通常在 99% 以上，"
             + "剩余部分是你这一轮新增的内容；换会话或上下文暴涨时命中率会明显下降。",
@@ -554,8 +613,21 @@
             + "it drops noticeably on a new session or a context surge.") +
           (last.cache_write ? "\n" + L("本次写入缓存 ", "Cache written this request ") + fmt(last.cache_write) : "") +
           (last.model ? "\n" + L("模型：", "Model: ") + last.model : "") +
-          "\n" + L("速度 ≥50 t/s 绿 · 25–50 黄 · <25 红；缓存命中 ≥90% 绿 · 50–90% 黄 · <50% 红",
-                  "Speed ≥50 t/s green · 25–50 yellow · <25 red; cache hit ≥90% green · 50–90% yellow · <50% red"));
+          "\n" + L("速度 ≥100 t/s 绿 · 50–100 黄 · <50 红；首字 ≤5s 绿 · 5–15s 黄 · >15s 红；缓存命中 ≥90% 绿 · 50–90% 黄 · <50% 红",
+                  "Speed ≥100 t/s green · 50–100 yellow · <50 red; TTFT ≤5s green · 5–15s yellow · >15s red; cache hit ≥90% green · 50–90% yellow · <50% red");
+        }
+        it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
+          (spdVal ? '<span class="spd ' + spdCls + '">' + spdVal + '</span><span class="dim">t/s</span>'
+                  : '<span class="dim">– t/s</span>') +
+          '<span class="sepv"></span>' +
+          '<span class="dim">' + L("首字", "TTFT") + "</span>" +
+          '<span class="' + ttftCls + '">' + sec(last.ttft_ms) + "</span>" +
+          '<span class="sepv"></span>' +
+          ico('<path d="M12 5v14M5 12h14"/>') +
+          '<span class="' + (inTok > 0 ? cacheCls : "dim") + '">' +
+          (inTok > 0 ? cachePctVal.toFixed(2) + "%" : "–") + "</span>" +
+          (agoTxt ? '<span class="sepv"></span><span class="ago">' + agoTxt + "</span>" : ""),
+          tipTxt);
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
@@ -683,7 +755,10 @@
         tool_calls: 0, retries: 0, ctx: 0, updated: "", last_at: 0, ctx_exc: 0,
         last_turn: {requests: 0, retries: 0, tool_calls: 0, tool_errors: 0, input: 0, output: 0,
           reasoning: 0, cache_read: 0, cache_write: 0, total: 0, duration_ms: 0, ttft_ms: 0},
-        last: {duration_ms: 0, ttft_ms: 0, model: "", tps: 0},
+        last: {duration_ms: 0, ttft_ms: 0, model: "", tps: 0, tps_gen: 0, tps_last: 0, tps_e2e: 0,
+          gen_ms: 0, gen_out: 0, gen_req: 0, gen_cov: 0, turn_out: 0, turn_ms: 0,
+          api_ttft_ms: 0, client_ms: 0, ttft_partial: false, cache_read: 0, input: 0,
+          cache_write: 0, cache_fresh: 0, ago_ms: 0, stale: false, at: 0},
         code: {add: null, del: null, files: null},
         tools: {total: 0, errors: 0, list: []},
         sub: {requests: 0, total: 0, input: 0, output: 0, cache_read: 0, reasoning: 0,
@@ -711,7 +786,21 @@
             for (var j = 0; j < rec2.length; j++) if (rec2[j].sid === mine) { p = rec2[j]; break; }
             if (!p) p = stubFor(mine);
           } else {
-            p = stubFor("");
+            /* v64：客户端上报"本窗口当前无活跃任务"（一轮结束后 activeTaskId 被清空），
+             * 但用户明明还停在这个会话上。旧行为直接给零值桩 → 速度/首字/缓存整项消失
+             * （"停滞就什么都没了"）。改为退回本地键启发式找本窗口工作区当前打开的会话：
+             * 有数据就显示它（数据多旧由 ago 标注说明），确实找不到（新工作区还没建过
+             * 会话）才给零值桩。泵新版（v11）会先用"最近一次非空会话"兜底 mine，
+             * 走不到这里的才是真的没有线索。 */
+            pc = pickCurrent(d);
+            if (pc && pc.sess) {
+              p = pc.sess;
+              pickedSid = p.sid;
+              window.__zusageWantSid = pc.want || p.sid;
+            } else {
+              p = stubFor((pc && pc.want) || "");
+              window.__zusageWantSid = (pc && pc.want) || "";
+            }
           }
         } else {
           pc = pickCurrent(d);
@@ -724,6 +813,9 @@
       excOn = excActive(p);   // 气泡的显示依据（track 每帧消费）
       var view = {
         session: p, last_turn: p.last_turn || {}, last: p.last || {},
+        /* v64：泵在"客户端已清空焦点会话（一轮结束/闲置）"时兜底用最近会话并置此位。
+         * 用于在条面标注"这是上一轮数据"，避免数字不动被误解成卡住。 */
+        mine_idle: !!d.mine_idle,
         /* v9：远端会话的「今日合计」用远端机数据，本地 today 只在显示本地会话时使用 */
         today: (p.remote && d.remote_today) ? d.remote_today : d.today,
         native_ctx: nativeCtxVal,
@@ -1186,6 +1278,7 @@
     /* ---------- 定位：重活低频（找输入框/找卡片），逐帧只做矩形跟随 ---------- */
     var composer = null, cardCache = null, everMounted = false, lastMountDiagAt = 0;
     var curDisplay = "none", lastPos = [-1, -1], hideSince = 0;
+    var lastAgoTick = 0;   // 停滞标注的定期刷新节流（见 track，v64）
 
     function setComposer(el) {
       releasePads();   // 旧卡片的让位边距先还原，新卡片马上重新加
@@ -1403,6 +1496,14 @@
         var maxW = Math.max(60, Math.round(ar.width - 24));
         if (bar.style.maxWidth !== maxW + "px") bar.style.maxWidth = maxW + "px";
         everMounted = true;
+        /* 停滞标注随时间自增刷新（v64）：db 没有新写入时泵不推送新 payload，
+         * "上一轮"的相对时间会停在旧值（刚跑完 1 分钟，过 10 分钟还写着 1 分钟）。
+         * 每 15s 用当前数据主动重跑一次 render：html 是纯函数、按 Date.now() 现算
+         * ago，输出没变时 render 内部的判等直接跳过 DOM 重建，代价只有一次拼串。 */
+        if (state.data && Date.now() - lastAgoTick > 15000) {
+          lastAgoTick = Date.now();
+          try { render(state.data); } catch (e) { err("停滞标注刷新失败", e); }
+        }
         if (slot === 0 && Date.now() - lastMountDiagAt > 5000) {
           lastMountDiagAt = Date.now();
           var br = bar.getBoundingClientRect(), bh = null;
