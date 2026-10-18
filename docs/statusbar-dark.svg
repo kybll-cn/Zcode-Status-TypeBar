@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="599" height="32" viewBox="0 0 599 32">
+<style>
+  .seg{display:flex;align-items:center;gap:3px;font:600 12.5px "Segoe UI","Microsoft YaHei",system-ui,sans-serif;color:#e9edf4;white-space:nowrap;height:26px}
+  .v{color:#e9edf4;font-weight:600}
+  .dim{color:#8b93a3;font-weight:500}
+  .ok{color:#3ecf8e}.warm{color:#f5b944}.hot{color:#ff6b57}
+  .eb{color:#ff6b57;font-weight:700}
+  .ico{stroke:#8b93a3;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+  .cbar{display:inline-block;width:38px;height:4px;border-radius:999px;background:#ffffff16;overflow:hidden;flex:0 0 auto;margin-right:5px}
+  .cbar i{display:block;height:100%;border-radius:999px}
+  .cbar i.ok{background:#3ecf8e}.cbar i.warm{background:#f5b944}.cbar i.hot{background:#ff6b57}
+</style>
+<rect x="0" y="0" width="599" height="32" rx="16" fill="#1b1e24" stroke="#ffffff1a" stroke-width="1"/>
+<line x1="5" y1="9" x2="5" y2="23" stroke="#ffffff14"/>
+<foreignObject x="5" y="3" width="76.39999999999999" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><svg xmlns="http://www.w3.org/2000/svg" class="ico" width="12" height="12" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg><tspan class="hot">12.9</tspan><tspan class="dim"> t/s</tspan></div></foreignObject>
+<line x1="86.39999999999999" y1="9" x2="86.39999999999999" y2="23" stroke="#ffffff14"/>
+<foreignObject x="86.39999999999999" y="3" width="68.8" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><tspan class="dim">首字</tspan> <tspan class="v">11.3s</tspan></div></foreignObject>
+<line x1="160.2" y1="5" x2="160.2" y2="27" stroke="#ffffff1a"/>
+<foreignObject x="160.2" y="3" width="61.199999999999996" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><svg xmlns="http://www.w3.org/2000/svg" class="ico" width="12" height="12" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><tspan class="ok">99.93%</tspan></div></foreignObject>
+<line x1="226.39999999999998" y1="5" x2="226.39999999999998" y2="27" stroke="#ffffff1a"/>
+<foreignObject x="226.39999999999998" y="3" width="92" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><span class="cbar"><i class="ok" style="width:51.1%"></i></span><tspan class="ok">51.1%</tspan></div></foreignObject>
+<line x1="323.4" y1="5" x2="323.4" y2="27" stroke="#ffffff1a"/>
+<foreignObject x="323.4" y="3" width="167.6" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><tspan class="v">212.61M</tspan><tspan class="dim"> │ 20轮 │ 745工具</tspan></div></foreignObject>
+<line x1="496" y1="5" x2="496" y2="27" stroke="#ffffff1a"/>
+<foreignObject x="496" y="3" width="30.799999999999997" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><svg xmlns="http://www.w3.org/2000/svg" class="ico" width="12" height="12" viewBox="0 0 24 24"><path d="M12 8v5M12 16h.01M12 8a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9"/></svg><tspan class="eb">61</tspan></div></foreignObject>
+<foreignObject x="531.8" y="3" width="61.199999999999996" height="26"><div xmlns="http://www.w3.org/1999/xhtml" class="seg"><tspan class="v">336.41M</tspan></div></foreignObject>
+</svg>

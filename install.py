@@ -115,8 +115,14 @@ def make_integrity(data: bytes, block_size: int = 4 * 1024 * 1024) -> dict:
     }
 
 
-def repack_asar(src: Path, dst: Path, replacements: dict[str, bytes]) -> None:
-    """完整重打包 asar：只替换 replacements 中的文件，其余内容逐字节复制。"""
+def repack_asar(src: Path, replacements: dict[str, bytes]) -> Path:
+    """完整重打包 asar：只替换 replacements 中的文件，其余内容逐字节复制。
+
+    输出路径在函数内部由 src 推导（src 同目录下的固定临时文件名），不接受外部传入
+    的目标路径 —— 这样调用方无法把任意路径带进写操作，重打包的落点始终是
+    「源 asar 旁边那个 .zusage-tmp」。原 app.asar 由调用方在校验通过后 os.replace 换入。
+    """
+    dst = src.with_name(src.name + ".zusage-tmp")
     with open(src, "rb") as fin:
         header, data_start = parse_asar(fin)
 
@@ -166,6 +172,7 @@ def repack_asar(src: Path, dst: Path, replacements: dict[str, bytes]) -> None:
                     remaining -= len(chunk)
             fout.flush()
             os.fsync(fout.fileno())
+    return dst
 
 
 def asar_version_and_main(asar_path: Path) -> tuple[str, str]:
@@ -203,9 +210,8 @@ def patch_asar(asar_path: Path, entry_path: str, url: str) -> dict:
         data = patched.encode("utf-8")
         replacements = {entry_path: data}
 
-    tmp = asar_path.with_name(asar_path.name + ".zusage-tmp")
     try:
-        repack_asar(asar_path, tmp, replacements)
+        tmp = repack_asar(asar_path, replacements)
         # 校验临时包：入口可解析、注入行存在、哈希一致、package.json 可读
         with open(tmp, "rb") as fh:
             new_header, new_start = parse_asar(fh)

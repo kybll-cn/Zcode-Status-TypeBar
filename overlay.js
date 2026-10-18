@@ -323,7 +323,7 @@
       panel.innerHTML =
       '<div class="phead">⚙ ' + L("状态条设置", "Status bar settings") + '<span class="pver">' + VERSION + '</span></div>' +
       '<div class="cap">' + L("显示项（条面）", "Display items (bar)") + '</div>' +
-      '<label><input type="checkbox" data-k="speed"><span>' + L("速度 · 首字", "Speed · TTFT") + '<em>' + L("最近一次请求的速度与首字延迟", "speed and first-token latency of the latest request") + '</em></span></label>' +
+      '<label><input type="checkbox" data-k="speed"><span>' + L("速度 · 首字 · 缓存", "Speed · TTFT · Cache") + '<em>' + L("最近一次请求的速度、首字延迟与缓存命中", "speed, first-token latency and cache hit of the latest request") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="ctx"><span>' + L("上下文", "Context") + '<em>' + L("进度条 + 百分比，颜色随占比变化", "progress bar + percentage, color by usage") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="win"><span>' + L("会话累计", "Session total") + '<em>' + L("当前会话 tokens / 轮数 / 工具调用", "session tokens / turns / tool calls") + '</em></span></label>' +
       '<label><input type="checkbox" data-k="err"><span>' + L("会话错误", "Session errors") + '<em>' + L("轮次报错 / 工具失败 / 重试，不含主动中断", "failed turns / tool failures / retries, excluding cancellations") + '</em></span></label>' +
@@ -514,14 +514,23 @@
             : L("若这是 SSH 远程 / 他机会话：在 config.json 配置 remote 段即可（README「SSH 远程会话支持」；ssh 也可写成 argv 数组，docker exec / wsl / kubectl exec 等通道都能借道）",
                 "If this is an SSH/remote session, add the remote section to config.json (see README; ssh may also be an argv array, so docker exec / wsl / kubectl exec all work)")));
       }
-      if (state.show.speed && (last.tps || last.ttft_ms || last.cache_read)) {
+      if (state.show.speed && (last.tps || last.ttft_ms || last.input)) {
         /* 第 1 项：速度 | 首字 | 缓存命中。三者同属"这一次请求快不快"的因果链：
          * 缓存命中多少 → 要重算多少上下文 → 首字等多久 → 端到端速度多少。
-         * 并排比拆成三项更容易看出瓶颈：命中率高但首字仍长，多半是上下文本身太大。 */
+         * 并排比拆成三项更容易看出瓶颈：命中率正常但首字仍长，多半是上下文本身太大。 */
         var tpsCls = !last.tps ? "dim" : last.tps >= 50 ? "ok" : last.tps >= 25 ? "warm" : "hot";
-        var inTok = last.input || 0, cacheTok = last.cache_read || 0;
-        var cacheRatio = inTok > 0 ? cacheTok / inTok * 100 : 0;
-        var cacheCls = cacheRatio >= 90 ? "ok" : cacheRatio >= 60 ? "warm" : "hot";
+        /* 缓存命中率 = cache_read ÷ input，保留两位小数。
+         * 小数位不够就会显示成假的 100%：实测连续对话里命中率在 99.2~99.98% 之间，
+         * 99.968% 用 toFixed(0) 和 toFixed(1) 都会变成 "100%" / "100.0%"。
+         * 而命中 100% 在物理上不可能 —— 每一轮总有新增内容没进缓存。那个假的完美
+         * 数字只会让人以为算错了。两位小数既如实反映真实值（99.97%），也看得出
+         * 缓存效果好坏：冷启动会掉到个位数甚至 0%，那才是真出问题。 */
+        var inTok = last.input || 0, freshTok = last.cache_fresh || 0;
+        /* 局部变量不能叫 cachePct —— 同作用域已有一个同名辅助函数（会话/本轮的缓存
+         * 命中率徽标），局部变量会遮蔽它，后面 cachePct(...) 调用会抛 TypeError，
+         * 整个 html() 崩掉、状态条整条消失（不是某一项不显示）。 */
+        var cachePctVal = inTok > 0 ? (inTok - freshTok) / inTok * 100 : 0;
+        var cacheCls = cachePctVal >= 90 ? "ok" : cachePctVal >= 50 ? "warm" : "hot";
         it(ico('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>') +
           (last.tps ? '<span class="' + tpsCls + '">' + last.tps + '</span><span class="dim">t/s</span>'
                     : '<span class="dim">–</span>') +
@@ -529,22 +538,24 @@
           '<span class="dim">' + L("首字", "TTFT") + "</span>" +
           '<span class="' + (last.ttft_ms ? "v" : "dim") + '">' + sec(last.ttft_ms) + "</span>" +
           '<span class="sepv"></span>' +
-          ico('<path d="M4 7h16M4 12h16M4 17h16"/>') +
+          ico('<path d="M12 5v14M5 12h14"/>') +
           '<span class="' + (inTok > 0 ? cacheCls : "dim") + '">' +
-          (inTok > 0 ? cacheRatio.toFixed(0) + "%" : "–") + "</span>",
+          (inTok > 0 ? cachePctVal.toFixed(2) + "%" : "–") + "</span>",
           L("速度：最近完成请求的输出 tokens ÷ 该请求总耗时（含首字等待与工具往返）",
             "Speed: output tokens ÷ total time of the latest completed request (including first-token wait and tool round-trips)") + "\n" +
           L("纯生成速度 ", "Pure generation speed ") + (last.tps_gen || "–") + " t/s" +
           L("（首 token 之后到完成）", " (first token to completion)") + "\n" +
           L("首字：", "First token: ") + sec(last.ttft_ms) + L(" · 单次耗时 ", " · Single request ") + sec(last.duration_ms) + "\n" +
-          L("缓存命中 ", "Cache hit ") + fmt(cacheTok) + " / " + fmt(inTok) +
-          (inTok > 0 ? "（" + cacheRatio.toFixed(1) + "%）" : "") +
-          L("。命中率高说明这段上下文服务端已有副本、无需重算，是首字延迟能压住的主要原因。",
-            ". A high hit rate means the context already exists server-side and is not recomputed, the main reason the first-token delay stays low.") +
+          L("缓存：命中 ", "Cache: hit ") + fmt(last.cache_read) + " / " + fmt(last.input) +
+          (inTok > 0 ? "（" + cachePctVal.toFixed(2) + "%）" : "") +
+          L("。连续对话里上下文大部分已在服务端，命中率通常在 99% 以上，"
+            + "剩余部分是你这一轮新增的内容；换会话或上下文暴涨时命中率会明显下降。",
+            ". In a continuous conversation most of the context already exists server-side, so the hit rate is usually above 99% and the rest is what this turn added; "
+            + "it drops noticeably on a new session or a context surge.") +
           (last.cache_write ? "\n" + L("本次写入缓存 ", "Cache written this request ") + fmt(last.cache_write) : "") +
           (last.model ? "\n" + L("模型：", "Model: ") + last.model : "") +
-          "\n" + L("速度 ≥50 t/s 绿 · 25–50 黄 · <25 红；缓存 ≥90% 绿 · 60–90% 黄 · <60% 红",
-                  "Speed ≥50 t/s green · 25–50 yellow · <25 red; cache ≥90% green · 60–90% yellow · <60% red"));
+          "\n" + L("速度 ≥50 t/s 绿 · 25–50 黄 · <25 红；缓存命中 ≥90% 绿 · 50–90% 黄 · <50% 红",
+                  "Speed ≥50 t/s green · 25–50 yellow · <25 red; cache hit ≥90% green · 50–90% yellow · <50% red"));
       }
       if (state.show.ctx) {
         var cw = parseInt(state.ctxOv, 10) || d.native_ctx || d.context_window || 0;
