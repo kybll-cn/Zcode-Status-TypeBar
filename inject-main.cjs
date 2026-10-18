@@ -12,7 +12,11 @@
  *          推送时给每个窗口注入 mine 字段 —— 多窗口各自显示自己的会话，不再猜"全局最近活跃"。 *
  *  v8：查询改常驻 python（zusage.py serve，stdin/stdout 行协议）——省每次 ~60-100ms 的
  *      解释器启动费；意外退出自动重启（30s 内连续 3 次判不稳定则回退一次性 spawn）；
- *      zusage.py mtime 变化自动重启（升级生效）；stdin EOF = 泵退出，常驻进程自清理。 */
+ *      zusage.py mtime 变化自动重启（升级生效）；stdin EOF = 泵退出，常驻进程自清理。
+ *  v11：mine 闲置兜底 —— 客户端在一轮结束/闲置时清空 activeTaskId（推 ""），底栏原先照
+ *      空串处理就退化成零值、速度等项整个消失。现在记住每窗口最近一次非空会话
+ *      （lastSid），闲置时用它作 mine 并带 mine_idle 标记，overlay 继续显示上一轮数据
+ *      并标注相对时间；wants 汇总同样带兜底，保证该会话不掉出快照池。 */
 "use strict";
 const path = require("path");
 const fs = require("fs");
@@ -81,9 +85,20 @@ function pushOnce(wc, payload) {
   if (!isMainWindowState(wc) || wc.isDestroyed() || !payload || typeof payload !== "object") return;
   /* 按窗口注入 mine（本窗口焦点会话 id，可为空串 = 该窗口当前无会话）：
    * overlay 收到 mine 字段就优先显示它，不再多窗口共享同一个猜测。
+   * v64：客户端在一轮结束/闲置时会把 activeTaskId 清空（推 ""），但用户明明还停在
+   * 那个会话上——底栏若照空串处理就退化成零值、速度等项整个消失（"停滞就什么都不显示"）。
+   * 故保留每个窗口最近一次非空会话 lastSid：客户端说"无活跃任务"时用它兜底，并带
+   * mine_idle=true 让 overlay 标注"上一轮"；该窗口从未有过会话才不带 mine（走键启发式）。
    * 必须对象合并后序列化，禁止对 JSON 字符串做括号手术——v34 首版 slice 掐尾少补一个
    * 右括号，生成语法错误代码且失败只进静默 catch，全部窗口停在初始零值（实测翻车）。 */
-  const obj = activeSid.has(wc.id) ? Object.assign({}, payload, { mine: activeSid.get(wc.id) || "" }) : payload;
+  let obj = payload;
+  if (activeSid.has(wc.id)) {
+    const cur = activeSid.get(wc.id) || "";
+    const lastSidVal = lastSid.get(wc.id) || "";
+    const sid = cur || lastSidVal;
+    obj = Object.assign({}, payload, { mine: sid });
+    if (!cur && sid) obj.mine_idle = true;   // 客户端当前无活跃任务，显示的是该会话上一轮
+  }
   /* U+2028/2029 转义：JSON.stringify 会输出裸字符，放进 executeJavaScript 字符串字面量
    * 有语法风险（zusage.py 侧 ensure_ascii 的同款考量；会话标题可能含任意文本） */
   const js = `window.__zusageUpdate && window.__zusageUpdate(${JSON.stringify(obj).replace(/[\u2028\u2029]/g, (c) => c === "\u2028" ? "\\u2028" : "\\u2029")})`;
@@ -94,7 +109,8 @@ function pushOnce(wc, payload) {
  * 追加监听器不影响原有处理。值为 "" = 窗口已同步但当前无会话（新空会话/非任务页）；
  * 不在表里 = 该窗口从未同步（辅助窗口），推送时不带 mine，overlay 走本地键启发式。 */
 const IPC_ACTIVE_SID = "zcode:sync-active-task-session";
-const activeSid = new Map();   // webContents.id → 会话 id 或 ""
+const activeSid = new Map();   // webContents.id → 会话 id 或 ""（客户端当前上报值）
+const lastSid = new Map();     // webContents.id → 最近一次非空会话 id（v64：停滞兜底）
 try {
   const { ipcMain } = require("electron");
   ipcMain.on(IPC_ACTIVE_SID, (e, sid) => {
@@ -103,6 +119,7 @@ try {
     const val = s && s.length <= 255 && /^[A-Za-z0-9_-]+$/.test(s) ? s : "";
     const prev = activeSid.get(e.sender.id);
     activeSid.set(e.sender.id, val);
+    if (val) lastSid.set(e.sender.id, val);   // v64：只记住非空值，供闲置兜底
     if (prev !== val) scheduleRetry(800);   // 会话切换/窗口就绪：尽快按新会话拉一次（限频器仍生效）
   });
 } catch (e) { LOG("ipc hook failed:", e.message); }
@@ -275,7 +292,9 @@ function maybeSpawn() {
       const wants = [];
       const push = (sid) => { if (sid && /^[A-Za-z0-9_-]{1,80}$/.test(sid) && !wants.includes(sid)) wants.push(sid); };
       wcs.forEach((wc, i) => {
-        if (activeSid.has(wc.id)) push(activeSid.get(wc.id) || "");
+        /* v64：空闲窗口（activeSid=""）也要把最近会话纳入 wants —— 停滞时它仍要显示上一轮数据，
+         * 不纳入的话该会话掉出快照池，底栏就退化成零值。 */
+        if (activeSid.has(wc.id)) push(activeSid.get(wc.id) || lastSid.get(wc.id) || "");
         let arr = [];
         try { arr = JSON.parse(vals[i] || "[]"); } catch (e) { }
         if (Array.isArray(arr)) arr.forEach(push);
@@ -357,4 +376,4 @@ const hook = (wc) => {
 app.on("web-contents-created", (e, wc) => hook(wc));
 for (const wc of webContents.getAllWebContents()) hook(wc);
 
-LOG("injected v10 (per-pane wants array), resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
+LOG("injected v11 (idle mine fallback via lastSid), per-pane wants array, resident query mode + remote SSH datasource (per-window active session via IPC, fs.watch db dir, remote poll_ms while remote session focused, zusage serve + one-shot fallback, activity_min_ms/heartbeat_ms, query timeout 15s)");
