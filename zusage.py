@@ -91,6 +91,11 @@ def fmt(n):
 
 SESSION_TIMEOUT_MS = 30 * 60 * 1000  # 最近30分钟有请求视为活跃会话
 
+# 停滞阈值（底栏）：最近一次请求完成超过这么久而没有新请求，视为"这一轮已经结束"。
+# 底栏照常显示上一轮的速度/首字/缓存（附相对时间），不因停滞隐藏或退回零值——
+# 一轮跑完后往往要停下来读代码/看输出，旧行为那种"速度突然整项消失"最让人以为插件坏了。
+STALE_MS = 2 * 60 * 1000
+
 
 _AGG_TTL_MS = 2000   # 聚合短缓存：今日合计/会话池是慢变量，2s 陈旧无感；泵 1.5s 拉一次省约一半全表聚合
 _AGG_CACHE = {}
@@ -572,6 +577,143 @@ def render_session_detail(con, prefix):
     return "\n".join(lines)
 
 
+# 最近一次完成请求（底栏「速度·首字·缓存」的数据源）。完整快照与轻量快照共用：
+# 单行索引查询 ~0.01ms（20 次实测 0.2ms），轻量路径带上它不会破坏瘦身初衷。
+_LAST_ROW_SQL = """select duration_ms, coalesce(time_to_first_token_ms,0) as ttft_col,
+                          completed_at, turn_id, model_id, output_tokens, first_token_at, started_at,
+                          coalesce(input_tokens,0) as input_n,
+                          coalesce(cache_read_input_tokens,0) as cache_read_n,
+                          coalesce(cache_creation_input_tokens,0) as cache_write_n
+                   from model_usage where session_id=? and status='completed'
+                   order by completed_at desc limit 1"""
+
+
+def _last_metrics(con, sid, last):
+    """底栏「速度·首字·缓存」整项的数据块（完整快照与轻量快照同源同口径）。
+
+    速度（v64 起）= 纯生成速度，与 Claude Code 等 CLI agent 的 tok/s 同口径：
+    sum(输出) ÷ sum(first_token_at → completed_at)，只累加"模型真正在吐字"的时间窗，
+    剔除首字等待与工具往返。旧口径是端到端（输出 ÷ 请求总耗时），实测同一轮能低
+    2~13 倍（turn 29cc29：端到端 11.1 t/s，真实生成 151.3 t/s），看上去像模型很慢，
+    其实是把 25 秒首字等待和 37 次工具往返都摊到了分母上。端到端值保留在 tps_e2e
+    供悬停对照（它反映的是"这一轮总共等了多久才拿到这些字"的体感）。
+
+    精度：全库约 28% 的 completed 行没有 first_token_at（magpie 网关对 MiniMax 的
+    部分请求不写该列；缺失的都是 output ≤ 300 的小请求），按可算行加权，output
+    覆盖率实测 85~97% —— 结果随 tps_gen 一起返回（gen_cov），前端据此标注估算。
+
+    首字（turn 级）= 用户发消息 → 屏幕上第一个字。含客户端准备段
+    （turn.started_at → first_model_start_at，实测常 6~9 秒：读文件/拼上下文/启动技能），
+    所以比"模型首包"大；两者都返回，悬停里拆开显示，便于分辨慢在客户端还是服务端。
+    turn_usage.time_to_first_token_ms 实测 100% 填充且语义 = first_token_at - started_at
+    （与 model_usage 的该列 28% 缺失形成对比），turn 级首字以它为准。
+
+    last 传 _LAST_ROW_SQL 的结果（可为 None，此时返回全零块）。
+    """
+    now_ms = int(time.time() * 1000)
+    d = {
+        "duration_ms": last["duration_ms"] if last else 0,
+        "ttft_ms": 0, "model": last["model_id"] if last else "",
+        "tps": 0,            # 兼容旧字段：末次请求端到端（output ÷ 总耗时）
+        "tps_gen": 0,        # 主显示：本轮加权纯生成速度
+        "tps_last": 0,       # 末次请求的纯生成速度（本轮无聚合数据时的兜底）
+        "tps_e2e": 0,        # 本轮端到端（悬停对照）
+        "gen_ms": 0, "gen_out": 0, "gen_req": 0, "gen_cov": 0,
+        "turn_out": 0, "turn_ms": 0,
+        "api_ttft_ms": 0,    # 模型首包（first_token_at - first_model_start_at）
+        "client_ms": 0,      # 客户端准备（first_model_start_at - turn.started_at）
+        "ttft_partial": False,   # 首字是"轮进行中"的近似值（缺客户端准备段）
+        "cache_read": 0, "input": 0, "cache_write": 0, "cache_fresh": 0,
+        "ago_ms": 0, "stale": False,
+        # 最近一次完成的绝对时刻（epoch ms）。前端用它现算"多久之前"：db 无新写入时
+        # payload 不刷新，ago_ms 会冻结在查询那一刻，绝对时刻才能让标注随时间自己走。
+        "at": 0,
+    }
+    if not last:
+        return d
+    # 单请求首字兜底：first_token_at - started_at 现算（该列本身 28% 缺失，不能只用它）
+    if last["first_token_at"] and last["started_at"] and last["first_token_at"] > last["started_at"]:
+        d["ttft_ms"] = last["first_token_at"] - last["started_at"]
+    elif last["ttft_col"]:
+        d["ttft_ms"] = last["ttft_col"]
+    if last["output_tokens"] and last["duration_ms"]:
+        d["tps"] = round(last["output_tokens"] / (last["duration_ms"] / 1000), 1)
+    if (last["output_tokens"] and last["first_token_at"] and last["completed_at"]
+            and last["completed_at"] > last["first_token_at"]):
+        d["tps_last"] = round(
+            last["output_tokens"] / ((last["completed_at"] - last["first_token_at"]) / 1000), 1)
+    d["cache_read"] = last["cache_read_n"]
+    d["input"] = last["input_n"]
+    d["cache_write"] = last["cache_write_n"]
+    d["cache_fresh"] = max(0, last["input_n"] - last["cache_read_n"])
+    if last["completed_at"]:
+        d["at"] = last["completed_at"]
+        d["ago_ms"] = max(0, now_ms - last["completed_at"])
+        d["stale"] = d["ago_ms"] > STALE_MS
+    if last["turn_id"]:
+        t = con.execute(
+            """select coalesce(time_to_first_token_ms,0) as ttft, first_token_at, first_model_start_at,
+                      started_at
+               from turn_usage where session_id=? and turn_id=? and status='completed'""",
+            (sid, last["turn_id"]),
+        ).fetchone()
+        if t:
+            ttft_turn = t["ttft"]
+            if not ttft_turn and t["first_token_at"] and t["started_at"]:
+                ttft_turn = max(0, t["first_token_at"] - t["started_at"])
+            if ttft_turn:
+                d["ttft_ms"] = ttft_turn
+            if t["started_at"] and t["first_model_start_at"]:
+                d["client_ms"] = max(0, t["first_model_start_at"] - t["started_at"])
+            if d["client_ms"] and ttft_turn:
+                # 模型首包 = turn 级首字 − 客户端准备段。用减法而非 first_token_at：
+                # turn_usage 的 first_token_at 也缺 13/107，减法只依赖 100% 填充的
+                # first_model_start_at 与 time_to_first_token_ms。
+                d["api_ttft_ms"] = max(0, ttft_turn - d["client_ms"])
+            elif t["first_token_at"] and t["first_model_start_at"]:
+                d["api_ttft_ms"] = max(0, t["first_token_at"] - t["first_model_start_at"])
+        else:
+            # 轮进行中：turn_usage 只在轮结束时落行（生成中查不到）。用本轮第一条有
+            # first_token_at 的请求现算，语义 = 模型请求发出→第一个字（缺客户端准备段，
+            # 比 turn 级小），标记 partial 供 UI 说明"本轮进行中"。
+            f = con.execute(
+                """select started_at, first_token_at from model_usage
+                   where session_id=? and turn_id=? and first_token_at is not null
+                     and started_at is not null order by started_at limit 1""",
+                (sid, last["turn_id"]),
+            ).fetchone()
+            if f and f["first_token_at"] > f["started_at"]:
+                d["ttft_ms"] = f["first_token_at"] - f["started_at"]
+                d["api_ttft_ms"] = d["ttft_ms"]
+                d["ttft_partial"] = True
+        g = con.execute(
+            """select
+                 sum(case when first_token_at is not null and completed_at > first_token_at
+                          then coalesce(output_tokens,0) + coalesce(reasoning_tokens,0) else 0 end) as out_ok,
+                 sum(case when first_token_at is not null and completed_at > first_token_at
+                          then completed_at - first_token_at else 0 end) as gen_ms,
+                 sum(coalesce(output_tokens,0) + coalesce(reasoning_tokens,0)) as out_all,
+                 sum(case when completed_at is not null and started_at is not null
+                          then completed_at - started_at else 0 end) as e2e_ms,
+                 sum(case when first_token_at is not null and completed_at > first_token_at
+                          then 1 else 0 end) as n_ok,
+                 count(*) as n
+               from model_usage where session_id=? and turn_id=? and status='completed'""",
+            (sid, last["turn_id"]),
+        ).fetchone()
+        if g:
+            d["turn_out"], d["turn_ms"] = g["out_all"] or 0, g["e2e_ms"] or 0
+            if g["gen_ms"]:
+                d["gen_ms"] = g["gen_ms"]
+                d["gen_out"] = g["out_ok"] or 0
+                d["gen_req"] = g["n_ok"] or 0
+                d["tps_gen"] = round((g["out_ok"] or 0) / (g["gen_ms"] / 1000), 1)
+                d["gen_cov"] = round((g["out_ok"] or 0) / g["out_all"], 3) if g["out_all"] else 0
+            if d["turn_ms"]:
+                d["tps_e2e"] = round(d["turn_out"] / (d["turn_ms"] / 1000), 1)
+    return d
+
+
 def _light_snapshot(con, sid, cfg):
     """recent 池轻量行（v8 瘦身）：两条聚合 SQL 出齐顶层计数，明细字段给空结构。
     状态条只渲染 1 个会话，recent 长尾行仅作会话切换兜底；兜底候选（force + latest +
@@ -597,7 +739,10 @@ def _light_snapshot(con, sid, cfg):
                 "reasoning": 0, "cache_write": 0, "active": False, "list": []},
         "tools": {"total": u["tool_calls"], "errors": 0, "list": []},
         "last_turn": dict(_EMPTY_TURN),
-        "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+        # v64：轻量行也带上「速度·首字·缓存」——原先给空块，长尾会话（久未活跃/停滞，
+        # 不在 latest+活跃前 2 的兜底候选里）被选中时底栏整个速度项消失，正是"停滞就
+        # 什么都不显示"的根因。单行索引查询 ~0.01ms，不破坏轻量路径的瘦身目的。
+        "last": _last_metrics(con, sid, con.execute(_LAST_ROW_SQL, (sid,)).fetchone()),
         "code": {"add": (srow["summary_additions"] if srow is not None else None),
                  "del": (srow["summary_deletions"] if srow is not None else None),
                  "files": (srow["summary_files"] if srow is not None else None)},
@@ -613,25 +758,9 @@ def _session_snapshot(con, sid, cfg):
     """单个会话的完整快照（最新会话与 recent 列表共用一份结构）。"""
     srow = con.execute("select * from session where id=?", (sid,)).fetchone()
     u = session_usage(con, sid)
-    last = con.execute(
-        """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at, started_at,
-                  coalesce(input_tokens,0) as input_n,
-                  coalesce(cache_read_input_tokens,0) as cache_read_n,
-                  coalesce(cache_creation_input_tokens,0) as cache_write_n
-           from model_usage where session_id=? and status='completed'
-           order by completed_at desc limit 1""",
-        (sid,),
-    ).fetchone()
-    # 首字延迟优先用时间戳现算：客户端写 time_to_first_token_ms 列并不可靠，
-    # 实际有相当比例的 completed 行该列为 NULL（抽样 5 条有 2 条），
-    # 直接 coalesce 成 0 会让"首字"显示成横杠。first_token_at - started_at 才是同一语义。
-    ttft_ms = 0
-    if last:
-        if last["first_token_at"] and last["started_at"] and last["first_token_at"] > last["started_at"]:
-            ttft_ms = last["first_token_at"] - last["started_at"]
-        elif last[1]:
-            ttft_ms = last[1]
+    last = con.execute(_LAST_ROW_SQL, (sid,)).fetchone()
+    # 「速度·首字·缓存」整项（口径与精度说明见 _last_metrics）
+    lastm = _last_metrics(con, sid, last)
     # 本轮数据源 = turn_usage 表的每轮完整聚合（v30 起，替代从 model_usage 手工按轮求和）：
     # 自带请求/重试/工具/工具错误计数与 reasoning 拆分，一轮一行。
     lt = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "input": 0,
@@ -668,21 +797,6 @@ def _session_snapshot(con, sid, cfg):
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
-    # 端到端速度：输出 token ÷ 本次请求总耗时（含首字等待与工具往返），反映真实等待体感。
-    # 与"首 token 之后的纯生成速度"（tps_gen）并存：前者数值小得多但更贴近用户感受，
-    # 底栏用端到端口径，悬停里两个都给，避免只给一个数字造成误读。
-    tps = 0
-    if last and last["output_tokens"] and last["duration_ms"]:
-        tps = round(last["output_tokens"] / (last["duration_ms"] / 1000), 1)
-    tps_gen = 0
-    if last and last["output_tokens"]:
-        gen_ms = None
-        if last["first_token_at"] and last["completed_at"] and last["completed_at"] > last["first_token_at"]:
-            gen_ms = last["completed_at"] - last["first_token_at"]
-        elif last["duration_ms"]:
-            gen_ms = last["duration_ms"]
-        if gen_ms:
-            tps_gen = round(last["output_tokens"] / (gen_ms / 1000), 1)
     # 会话错误汇总（口径：轮次真报错 + 工具失败 + 模型重试；用户主动中断 cancelled 不算错误）。
     err = con.execute(
         """select sum(case when status='error' then 1 else 0 end),
@@ -735,22 +849,10 @@ def _session_snapshot(con, sid, cfg):
                 "total": err_turns + err_tools + err_retry},
         "tools": tools,
         "last_turn": lt,
-        "last": {
-            "duration_ms": last["duration_ms"] if last else 0,
-            "ttft_ms": ttft_ms,
-            "model": last["model_id"] if last else "",
-            "tps": tps,
-            "tps_gen": tps_gen,
-            # 最近一次请求的缓存情况。命中率(cache_read÷input)在连续对话里恒等于
-            # 99.9~100%、冷启动时又趋近 0，呈两极分布，没有中间信息量 —— 底栏因此改显
-            # 「新增」= input − cache_read，即这一轮真正需要模型处理的 token 数。
-            # 这个数才是决定首字快慢的量：连续对话时它是几百，冷启动时是几十万。
-            "cache_read": last["cache_read_n"] if last else 0,
-            "input": last["input_n"] if last else 0,
-            "cache_write": last["cache_write_n"] if last else 0,
-            "cache_fresh": max(0, (last["input_n"] if last else 0)
-                               - (last["cache_read_n"] if last else 0)),
-        },
+        # 「速度·首字·缓存」整项：口径（纯生成速度 / turn 级首字）与精度（覆盖率）说明见 _last_metrics。
+        # 缓存注记（保留）：命中率 cache_read÷input 在连续对话里 99.2~99.98%，呈两极分布，
+        # 底栏只显示百分比（两位小数）；「新增」= input − cache_read 决定首字快慢，放悬停明细。
+        "last": lastm,
         # 代码变更统计（session 表 summary_* 列，ZCode 目前未填充、全库为 NULL，有值才会显示）
         "code": {
             "add": (srow["summary_additions"] if srow is not None else None),
@@ -939,8 +1041,7 @@ def snapshot(force_sid=""):
                     "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
                     "err": {"turns": 0, "tools": 0, "retries": 0, "total": 0},
                     "last_turn": dict(_EMPTY_TURN),
-                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0, "tps_gen": 0,
-                              "cache_read": 0, "input": 0, "cache_write": 0, "cache_fresh": 0},
+                    "last": _last_metrics(con, "", None),   # 全零块（同 _last_metrics 完整结构）
                     "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
                     "tools": {"total": 0, "errors": 0, "list": []},
                     "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
