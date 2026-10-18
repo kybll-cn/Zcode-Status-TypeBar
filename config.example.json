@@ -1,0 +1,16 @@
+{
+  "activity_min_ms": 1500,
+  "heartbeat_ms": 30000,
+  "hot_reload": true,
+  "context_window": 1000000,
+  "lang": "zh",
+  "resident": true,
+  "remote": {
+    "enabled": false,
+    "ssh": "my-server",
+    "script": ".zcode/Zcode-Status-TypeBar/zusage.py",
+    "python": "python3",
+    "timeout_s": 6,
+    "host_label": "dev-server"
+  }
+}

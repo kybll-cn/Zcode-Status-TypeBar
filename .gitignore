@@ -1,0 +1,19 @@
+# 安装器生成的本地配置（含本机绝对路径，不应提交）
+config.json
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 发布包
+*.zip
+dist/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 排障残留（旧版本安装器可能留下的诊断文件）
+diag-*.json

@@ -1,0 +1,349 @@
+# Zcode-Status-TypeBar
+
+给 ZCode 桌面客户端用的本地 token 用量状态条：在聊天输入框正下方显示一条悬浮胶囊条，实时展示当前会话的 token 消耗、上下文占用、今日合计、工具调用和后台子代理用量。另附带一个只读 MCP 工具 `token_usage`，可以直接在对话里查询用量。
+
+Windows 客户端注入式工具，通过改写 ZCode 的 `app.asar` 生效。
+
+## ⚠️ 先读这一段：它会修改客户端文件
+
+**这不是官方插件市场里的扩展。** ZCode 的插件体系目前不支持注入 UI（没有 `statusLine` 这类 hook 事件），所以要做出悬浮状态条，只能改写客户端的 `app.asar`：在主进程入口追加一行 import，让它在启动时把状态条注入渲染进程。
+
+这意味着：
+
+- 安装会**修改** `%LOCALAPPDATA%\Programs\ZCode\resources\app.asar`（约 340 MB）；
+- 安装器会先把它备份成 `app.asar.zusage-backup-<版本>`，卸载可完整还原；
+- **ZCode 每次升级都会覆盖 `app.asar`，状态条会消失**，需要重新运行安装器；
+- 杀毒软件可能因「修改客户端文件 + 注入 JS」报毒，这是启发式误报，源码全部公开可审阅；
+- 使用风险自负。请确保你有权这样做。
+
+如果你不能接受修改客户端文件，本项目不适合你。不接受也没关系。
+
+**所有源码都在本目录**，只有 5 个文件、约 5000 行，安装前可以自己读一遍：
+`install.py` 和 `inject-main.cjs` 是最该先看的两个。
+
+## 它做了什么
+
+```
+┌──────────────────────────────────────────────┐
+│  输入消息…                                    │
+└──────────────────────────────────────────────┘
+   ◔ 上下文 12%   ● 本轮 1.2K   Σ 会话 3.4M   ☀ 今日 5.6M   ⚙
+```
+
+- 鼠标悬停任意一项：显示该项的详细拆解（input / output / cache read / 耗时 / 首 token 等）。
+- 点击「子代理」项：打开每个子代理的独立消耗面板。
+- 点击右侧 ⚙：勾选要显示的条目、覆盖上下文窗口大小、切换中英文。
+- 自动跟随 ZCode 的浅色/深色主题。
+- 多窗口 / 分屏时，每个聊天 pane 各自显示自己会话的数字。
+
+**完全本地。** 数据库只读取、不写入，状态条数据只在主进程和渲染进程之间传递，不上传任何内容，也不联网。唯一的例外是可选的 SSH 远程查询功能，默认关闭。
+
+## 系统要求
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows 10 / 11（本项目按 Windows 路径编写） |
+| ZCode | 桌面版，**已验证 3.15.3** |
+| Python | **3.8+**。一键安装会在缺失时自动装上；手动方式才需要事先准备。已验证 3.12.7 |
+| 权限 | ZCode 装在用户目录（默认 `%LOCALAPPDATA%\Programs\ZCode`）时无需管理员；装在 `Program Files` 时需管理员终端 |
+
+ZCode 需要至少启动过一次，让它生成 `%USERPROFILE%\.zcode\cli\db\db.sqlite`。
+
+## 安装
+
+### 方式 A：一键安装（推荐）
+
+1. 下载 zip 并解压到任意目录（路径里有空格或中文都没关系）；
+2. **完全退出 ZCode** —— 关掉所有窗口，并在系统托盘（右下角隐藏图标里）右键 ZCode 图标选择「退出」。只关窗口不够，托盘进程还在时会占用文件；
+3. 双击解压出来的 **`install.bat`**。
+
+就这一步。它会自动：
+
+- 找到你的 Python 3；**没装的话自动装上**（优先用 `winget`，没有 winget 就从官网下静默安装包，约 26 MB），所以你不需要事先准备 Python；
+- 检查 ZCode 是否真的退出了，没退出就停下并告诉你怎么做（它不会替你杀进程）；
+- 定位 `app.asar`；如果 ZCode 装在 `Program Files` 这类需要管理员权限的目录，会自动弹 UAC 提权后重跑自己；
+- 运行 `install.py` 完成注入与 MCP 注册；
+- 每一步都有中文提示，失败会说明原因和下一步怎么办。
+
+### 方式 B：手动运行（习惯看命令行的）
+
+先完全退出 ZCode，然后：
+
+```bat
+cd /d "C:\Users\你\Downloads\Zcode-Status-TypeBar"
+py -3 install.py
+```
+
+没有 Python 就用 `python install.py`。如果提示 `python` 不是内部或外部命令，请先装 Python 3 并勾选 Add to PATH，或者干脆用方式 A。
+
+### 装了些什么
+
+安装器会自动完成四件事：
+
+1. 复制插件文件到 `%USERPROFILE%\.zcode\Zcode-Status-TypeBar`；
+2. 生成 `config.json`（记录当前 Python 路径和 `app.asar` 路径）；
+3. 备份并注入 `app.asar`：在主进程入口 `out/main/index.js` 末尾追加一条动态 import，同时修正 asar 头部的文件大小、偏移和 SHA256 完整性信息；
+4. 把 `usage_mcp.py` 注册到 `%USERPROFILE%\.zcode\cli\config.json` 的 MCP server 列表里。
+
+成功时最后几行类似：
+
+```
+[4/4] 已注册 MCP server: C:\Users\你\.zcode\cli\config.json
+
+安装完成。请启动 ZCode：输入框下方会出现 token 用量状态条。
+```
+
+安装器会先把原 `app.asar` 备份成 `app.asar.zusage-backup-<ZCode版本>`，放在 ZCode 的 `resources` 目录里。
+
+### 启动并验证
+
+启动 ZCode，打开任意一个聊天会话。输入框下方出现状态条即安装成功。
+
+验证清单：
+
+- [ ] 输入框下方出现胶囊状态条，至少能看到「上下文 / 本轮 / 会话累计 / 今日合计」中的几项；
+- [ ] 鼠标悬停条目能看到明细；
+- [ ] 点击 ⚙ 能打开设置面板；
+- [ ] 在新会话里问「查询今天的 token 用量」，模型能调用 `token_usage` 工具（若没有，重启一次 ZCode）。
+
+> 新会话在第一次模型请求完成前会显示 0，这是正常的：数据从 `db.sqlite` 读取，请求完成后才落库。
+
+## 安装器参数（可选）
+
+```text
+python install.py [选项]
+
+  --asar PATH      手动指定 app.asar 路径（自动查找失败时使用）
+  --dest PATH      自定义插件安装目录（默认 %USERPROFILE%\.zcode\Zcode-Status-TypeBar）
+  --skip-mcp       只装状态条，不注册 MCP server
+  --force          跳过 ZCode 进程检查（仅建议对 asar 副本做测试）
+```
+
+ZCode 默认安装在以下位置，安装器会自动查找：
+
+- `%LOCALAPPDATA%\Programs\ZCode\resources\app.asar`
+- `%PROGRAMFILES%\ZCode\resources\app.asar`
+- `%PROGRAMFILES(X86)%\ZCode\resources\app.asar`
+
+如果自定义了安装位置，例如：
+
+```bat
+python install.py --asar "D:\Apps\ZCode\resources\app.asar"
+```
+
+## 配置说明
+
+安装后配置位于 `%USERPROFILE%\.zcode\Zcode-Status-TypeBar\config.json`。显示项、语言、上下文窗口建议直接在状态条的 ⚙ 面板里改，即时生效；`config.json` 里的查询节流、心跳、热更新等参数会在几秒内生效。修改 `python_path` 或 `asar_path` 后建议重启 ZCode（必要时重新运行安装器）。
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `python_path` | 安装器使用的 Python | 主进程调用 `zusage.py` 用的解释器；Python 换位置后要改这里或重跑安装器 |
+| `asar_path` | 自动检测 | ZCode 的 `app.asar` 路径，升级/重装时用于重新注入 |
+| `activity_min_ms` | `1500` | 数据查询的最小间隔（毫秒），防止频繁拉起查询 |
+| `heartbeat_ms` | `30000` | 空闲时兜底拉取间隔；完全空闲时不会开进程轮询 |
+| `hot_reload` | `true` | 监听 `overlay.js` / `zusage.py` 的 mtime 并热更新；发布稳定版可设 `false` |
+| `context_window` | `1000000` | 上下文窗口回退值。状态条优先读客户端原生 UI 或模型目录，读不到才用它 |
+| `lang` | `zh` | 状态条 / CLI / MCP 的默认语言：`zh` 或 `en` |
+| `resident` | 缺省 `true` | 使用常驻 Python 查询进程；设为 `false` 则每次查询启动一次性进程 |
+| `remote` | 无 | SSH 远程会话支持，见下文 |
+
+`config.example.json` 是一份不含本机绝对路径的示例。
+
+## 使用说明
+
+### 状态条条目
+
+| 条目 | 显示内容 | 悬停/点击 |
+| --- | --- | --- |
+| 上下文 | 当前会话上下文占窗口的百分比 + 微进度条（绿/黄/红三档） | 悬停看已用 token / 窗口容量；超限被拒时红色闪烁并弹出提示 |
+| 本轮 | 最近一轮的 tokens、请求次数、耗时、首 token 延迟 | 悬停看 input/output/cache/思考、重试、工具错误 |
+| 会话累计 | 当前会话全部请求的 tokens、轮数、次数 | 悬停看代码变更行数等 |
+| 工具调用 | 当前会话工具调用次数 | 悬停按工具名列出次数、耗时、错误数 |
+| 今日合计 | 今天所有会话的 token 消耗 | 悬停看 input/output/cache read |
+| 子代理 | 后台子代理消耗和运行状态（呼吸灯） | 点击打开逐个子代理明细面板 |
+
+### 设置面板
+
+点击状态条右侧 ⚙：
+
+- 勾选/取消条面上的显示项（保存在浏览器 localStorage，按客户端共享）；
+- 上下文窗口：留空 = 自动（原生 UI > 模型目录 > `config.json` 的 `context_window`）；
+- Language：中文 / English。
+
+### 上下文超限提示
+
+如果某次请求因超出上下文窗口被客户端拒绝，状态条会变红闪烁并自动弹出提示气泡，给出回滚、换更大窗口模型、新开会话接手等处理建议，并显示会话 ID 方便复制。
+
+## MCP 工具 `token_usage`
+
+安装器会把 `usage_mcp.py` 注册为本地 stdio MCP server，名字是 `Zcode-Status-TypeBar`。工具只读查询 `%USERPROFILE%\.zcode\cli\db\db.sqlite`。
+
+| `scope` | 返回内容 |
+| --- | --- |
+| `current`（默认） | 当前会话 + 今日合计 |
+| `today` | 今日所有会话汇总 |
+| `week` | 近 7 天每日用量 |
+| `days:N` | 近 N 天每日用量 |
+| `sessions` / `sessions:N` | 最近 N 个会话（默认 10） |
+| `models` / `models:days` | 按模型聚合（默认近 7 天） |
+| `session:<id前缀>` | 指定会话明细，含按模型和子代理 |
+| `workspace:<目录关键词>` | 按工作区聚合主会话 + 子代理 |
+
+示例提问：
+
+- 「查询当前 token 用量」
+- 「用 token_usage 看最近 7 天每天的消耗」
+- 「看 workspace:my-project 的总用量」
+
+如果不需要 MCP，重新运行安装器时加 `--skip-mcp`，或手动删除 `%USERPROFILE%\.zcode\cli\config.json` 中对应的 server 条目。
+
+## SSH 远程会话支持（可选）
+
+当 ZCode 桌面客户端连接的是远端 `zcode-server` 时，会话数据落在远端机的 `~/.zcode/cli/db/db.sqlite`，本地库查不到。可在本机 `config.json` 增加 `remote` 段，让插件通过 SSH 到远端执行同一份 `zusage.py`：
+
+```json
+{
+  "remote": {
+    "enabled": true,
+    "ssh": "my-server",
+    "script": ".zcode/Zcode-Status-TypeBar/zusage.py",
+    "python": "python3",
+    "timeout_s": 6,
+    "host_label": "dev-server"
+  }
+}
+```
+
+- `ssh` 可以是 `~/.ssh/config` 里的主机别名，也可以是 argv 数组，例如 `["ssh", "-p", "2222", "user@host"]`，或借道 `docker exec` / `wsl` 等通道；
+- `script` 是远端 `zusage.py` 的路径（相对于远端用户家目录或绝对路径），需要先把本插件复制到远端；
+- 远端只需要 `zusage.py`，**不要**在远端配置 `remote` 段，避免递归；
+- 建议配置 SSH 公钥登录；查询有超时保护，失败只影响数字显示，不影响客户端。
+
+只在聚焦远端会话且本地库没有该会话时才会发起 SSH，切回本地会话后恢复本地事件触发。
+
+## 升级与客户端更新
+
+- **插件升级 / 修复**：关闭 ZCode，重新运行 `install.py`。安装器会先移除旧注入行再写入新行，重复运行是幂等的。
+- **ZCode 客户端升级**：客户端更新会覆盖 `app.asar`，状态条会消失，MCP 也可能需要重启。升级后重新运行 `install.py` 即可。安装器会重新检测路径并生成对应版本的备份。
+- 备份文件 `app.asar.zusage-backup-<版本>` 与 `app.asar` 同目录，每个客户端版本一份（约 340 MB）。确认新版本稳定后可以删除旧版本的备份以释放空间。
+- 如果 ZCode 改了主进程入口结构，安装器会报「在 asar 中找不到入口文件」并中止，不会写入半成品。此时需要等待插件适配新版本。
+- 配置（`config.json`）在升级时保留，只有 `python_path` / `asar_path` 会被刷新。
+
+## 卸载
+
+关闭 ZCode 后，双击 **`uninstall.bat`**，或手动运行：
+
+```bat
+python uninstall.py
+```
+
+默认行为：
+
+1. 从当前 `app.asar` 的主进程入口删除注入行，并修正 asar 头部；
+2. 从 `%USERPROFILE%\.zcode\cli\config.json` 删除 MCP server 注册；
+3. 删除插件目录 `%USERPROFILE%\.zcode\Zcode-Status-TypeBar`。
+
+可选参数：
+
+```text
+--keep-files       保留插件目录，只移除注入和 MCP 注册
+--restore-backup   用 app.asar.zusage-backup-<版本> 还原客户端
+--dry-run          只显示将要执行的操作
+--force            跳过 ZCode 进程检查
+```
+
+`--restore-backup` 只应在客户端版本没有变化时使用；ZCode 升级后旧备份可能与新版本不匹配，默认的「移除注入」模式更安全。
+
+卸载后建议重新启动一次 ZCode，确认客户端正常。
+
+## 常见问题
+
+**状态条不出现**
+
+1. 确认 ZCode 是**完全退出后重新启动**的，而不是只关闭窗口；
+2. 确认插件目录存在：`%USERPROFILE%\.zcode\Zcode-Status-TypeBar`；
+3. 在命令行运行 `python "%USERPROFILE%\.zcode\Zcode-Status-TypeBar\zusage.py" now`，能输出用量说明 Python 和数据库正常；
+4. 检查 `config.json` 的 `python_path` 是否指向真实存在的 `python.exe`；
+5. 如果最近升级过 ZCode，重新运行 `install.py`；
+6. 状态条只注入聊天窗口，设置页 / 登录页不会显示；
+7. 以上都正常仍然不出现，打开 **帮助 → 开发者工具** 看 Console：没有 `[zusage]` 输出说明注入本身没成功；有 `[zusage] 状态条未挂载` 则说明注入成功但找不到输入框，输出里的 `composerHits` 是各选择器的命中数，ZCode 改版时会用到；在控制台输入 `window.__zusageDiag` 可看更多挂载信息。
+
+**数字一直是 0**
+
+新会话在第一次请求完成前没有数据；`db.sqlite` 在请求完成后才写入。若会话是 SSH 远端会话，本地库没有数据，需要配置 `remote` 段或查看远端库。悬停状态条会提示「不在本地库」。
+
+**提示 spawn failed / Python 无法启动**
+
+`config.json` 里的 `python_path` 失效（Python 升级、卸载或换盘）。改回正确的 `python.exe` 路径，或重新运行 `install.py`。
+
+**MCP 工具 `token_usage` 不出现**
+
+1. 重启 ZCode；
+2. 检查 `%USERPROFILE%\.zcode\cli\config.json` 是否有 `Zcode-Status-TypeBar` 条目；
+3. 确认条目里的 `command` 和 `args` 路径存在；
+4. MCP 注册失败不影响状态条，可以手动按上面的 JSON 结构补上。
+
+**安装时报 Permission denied / 拒绝访问**
+
+ZCode 还在运行，或装在了需要管理员权限的 `Program Files`。完全退出 ZCode；仍失败时用「以管理员身份运行」打开 PowerShell 再执行 `python install.py`。
+
+**安装时报「不是有效的 asar 头部」或「找不到入口文件」**
+
+ZCode 版本与插件不兼容，或 `app.asar` 被其他工具改过。安装器不会修改文件；请确认 ZCode 版本，等待插件适配，或先把 `app.asar` 恢复为原版再试。
+
+**杀毒软件报警**
+
+插件会修改 `app.asar` 并向渲染进程注入 JS，这类行为可能被启发式规则误报。所有源码都在本目录，可自行审阅；只读本地数据库，不联网（可选的 SSH 远程功能除外）。如不放心，可在安装前把 `install.py` 和 `inject-main.cjs` 检查一遍。
+
+## 安全与隐私
+
+- `zusage.py` / `usage_mcp.py` 以**只读**方式打开 `~/.zcode/cli/db/db.sqlite`，只执行 `SELECT`；
+- 状态条数据只在本地进程间传递（主进程 → 渲染进程），不上传；
+- `usage_mcp.py` 是本地 stdio 进程，不监听端口；
+- 唯一的网络行为是可选的 SSH 远程查询（`remote.enabled=true` 时），默认关闭；
+- 排障信息（状态条没挂载时的选择器命中数、异常栈）只写 DevTools 控制台，**不落盘、不外发**；
+  在控制台可查 `window.__zusageDiag`；
+- 安装器会改写 `app.asar` 并保留备份；卸载会移除注入并修正 asar 头部。
+
+## 文件说明
+
+| 文件 | 作用 |
+| --- | --- |
+| `install.py` | 安装器：复制文件、生成配置、注入 `app.asar`、注册 MCP |
+| `uninstall.py` | 卸载器：移除注入、注销 MCP、删除插件目录 |
+| `install.bat` / `uninstall.bat` | Windows 一键入口 |
+| `inject-main.cjs` | 主进程 loader：监听数据库、拉起 Python 查询、向窗口注入 overlay |
+| `overlay.js` | 渲染进程状态条（自包含 IIFE，跟随主题、支持分屏与热更新） |
+| `zusage.py` | 用量查询核心：CLI、`serve` 常驻模式、SSH 远程数据源 |
+| `usage_mcp.py` | MCP stdio server，暴露 `token_usage` 工具 |
+| `config.example.json` | 配置示例（安装器会生成实际的 `config.json`） |
+| `CHANGELOG.md` | 更新日志 |
+| `CONTRIBUTING.md` | 贡献指南（含必须自测的检查项） |
+| `LICENSE` | GNU AGPL v3 许可 |
+
+## 兼容性与验证记录
+
+- 打包时的客户端：ZCode Desktop **3.15.3**（`out/main/index.js` 入口）；
+- 打包时的 Python：**3.12.7**；
+- 安装器已在 `app.asar` 副本上完成以下验证：
+  - 注入后重新解析 asar，入口文件与 SHA256 校验通过；
+  - 其余 27,844 个打包文件逐字节一致；
+  - 重复安装幂等（asar 字节级不变）；
+  - 卸载后注入行完全移除，全部 27,844 个文件内容与原版一致、完整性哈希全部有效；
+  - 用 Electron 自身的 fs 读取路径验证重打包后的 asar 仍可正常解析（`package.json`、
+    主进程入口可读且 integrity 校验通过）；
+  - MCP 配置合并/移除不影响其他 server。
+
+> 卸载后 `app.asar` 的**整体 SHA256** 与原版不同：重打包会重新序列化 asar 头部
+> （键序与空白变化），文件内容本身逐字节一致，Electron 读取不受影响。
+
+ZCode 后续版本可能调整主进程入口或 asar 结构，升级客户端后请先重新运行安装器并观察是否报错。
+
+## 许可
+
+**GNU Affero General Public License v3.0 或更高版本。**
+
+AGPL 是在 GPL 基础上增加的"网络交互"条款：如果你把本项目改造后通过网络提供给用户使用，
+也必须向这些用户提供你的修改版源码。
+
+使用风险自负；修改客户端文件前请确保你有权这样做，并保留备份。
