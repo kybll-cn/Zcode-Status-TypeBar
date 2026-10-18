@@ -615,11 +615,20 @@ def _session_snapshot(con, sid, cfg):
     u = session_usage(con, sid)
     last = con.execute(
         """select duration_ms, coalesce(time_to_first_token_ms,0), completed_at, turn_id, model_id,
-                  output_tokens, first_token_at
+                  output_tokens, first_token_at, started_at
            from model_usage where session_id=? and status='completed'
            order by completed_at desc limit 1""",
         (sid,),
     ).fetchone()
+    # 首字延迟优先用时间戳现算：客户端写 time_to_first_token_ms 列并不可靠，
+    # 实际有相当比例的 completed 行该列为 NULL（抽样 5 条有 2 条），
+    # 直接 coalesce 成 0 会让"首字"显示成横杠。first_token_at - started_at 才是同一语义。
+    ttft_ms = 0
+    if last:
+        if last["first_token_at"] and last["started_at"] and last["first_token_at"] > last["started_at"]:
+            ttft_ms = last["first_token_at"] - last["started_at"]
+        elif last[1]:
+            ttft_ms = last[1]
     # 本轮数据源 = turn_usage 表的每轮完整聚合（v30 起，替代从 model_usage 手工按轮求和）：
     # 自带请求/重试/工具/工具错误计数与 reasoning 拆分，一轮一行。
     lt = {"requests": 0, "retries": 0, "tool_calls": 0, "tool_errors": 0, "input": 0,
@@ -656,8 +665,13 @@ def _session_snapshot(con, sid, cfg):
     lr = con.execute("select max(completed_at) from model_usage where session_id=?", (sid,)).fetchone()
     active = bool(lr and lr[0] and int(time.time() * 1000) - lr[0] < SESSION_TIMEOUT_MS)
     ctx_auto = lookup_context_window(last["model_id"]) if last else None
-    # 生成速度：输出 token ÷ 生成耗时（首 token 之后到完成；无 first_token_at 时退化为总耗时）
+    # 端到端速度：输出 token ÷ 本次请求总耗时（含首字等待与工具往返），反映真实等待体感。
+    # 与"首 token 之后的纯生成速度"（tps_gen）并存：前者数值小得多但更贴近用户感受，
+    # 底栏用端到端口径，悬停里两个都给，避免只给一个数字造成误读。
     tps = 0
+    if last and last["output_tokens"] and last["duration_ms"]:
+        tps = round(last["output_tokens"] / (last["duration_ms"] / 1000), 1)
+    tps_gen = 0
     if last and last["output_tokens"]:
         gen_ms = None
         if last["first_token_at"] and last["completed_at"] and last["completed_at"] > last["first_token_at"]:
@@ -665,43 +679,22 @@ def _session_snapshot(con, sid, cfg):
         elif last["duration_ms"]:
             gen_ms = last["duration_ms"]
         if gen_ms:
-            tps = round(last["output_tokens"] / (gen_ms / 1000), 1)
-    sub_rows = con.execute(
-        """select m.session_id, coalesce(m.agent,''), coalesce(s2.title,''), count(*),
-                  coalesce(sum(m.computed_total_tokens),0),
-                  coalesce(sum(m.input_tokens),0), coalesce(sum(m.output_tokens),0),
-                  coalesce(sum(m.cache_read_input_tokens),0), coalesce(sum(m.reasoning_tokens),0),
-                  coalesce(sum(m.cache_creation_input_tokens),0), max(m.completed_at), s2.time_created
-           from model_usage m join session s2 on m.session_id = s2.id
-           where m.query_source='subagent' and s2.parent_id=? and m.status='completed'
-           group by m.session_id order by max(m.completed_at) desc""",
+            tps_gen = round(last["output_tokens"] / (gen_ms / 1000), 1)
+    # 会话错误汇总（口径：轮次真报错 + 工具失败 + 模型重试；用户主动中断 cancelled 不算错误）。
+    err = con.execute(
+        """select sum(case when status='error' then 1 else 0 end),
+                  coalesce(sum(tool_error_count),0), coalesce(sum(model_retry_count),0)
+           from turn_usage where session_id=?""",
         (sid,),
-    ).fetchall()
-    # 子代理任务名：Agent 工具调用 part 的 input.description（与右侧"子智能体目录"面板同源）。
-    # 主关联用官方回执：完成后 part.state.output 尾部带 "agentId: agent_xxx" 行，
-    # 子会话 id 即 "sess_subagent_"+agentId（客户端自己的硬关联，无歧义）。
-    # 兜底只给运行中尚未出现回执的条目：prompt 前缀匹配且候选唯一才绑（同前缀多候选宁可
-    # 无名，不做时间猜测——历史 part 不带 childSessionId，时间最近邻存在错位风险）。
-    sub_tasks = _sub_agent_tasks(con, sid) if sub_rows else {}
-    now_ms = int(time.time() * 1000)
-    sub = {
-        "requests": sum(r[3] for r in sub_rows),
-        "total": sum(r[4] for r in sub_rows),
-        "input": sum(r[5] for r in sub_rows),
-        "output": sum(r[6] for r in sub_rows),
-        "cache_read": sum(r[7] for r in sub_rows),
-        "reasoning": sum(r[8] for r in sub_rows),
-        "cache_write": sum(r[9] for r in sub_rows),
-        "active": any(r[10] and now_ms - r[10] < 30000 for r in sub_rows),
-        "list": [
-            {"sid": r[0], "agent": r[1], "title": r[2], "task": sub_tasks.get(r[0], ""),
-             "requests": r[3], "total": r[4],
-             "input": r[5], "output": r[6], "cache_read": r[7], "reasoning": r[8],
-             "cache_write": r[9], "last": (r[10] or 0),
-             "active": bool(r[10] and now_ms - r[10] < 30000)}
-            for r in sub_rows
-        ],
-    }
+    ).fetchone()
+    # tool_usage 里的失败行（turn_usage.tool_error_count 已含大部分，这里补两者不一致的部分）
+    terr = con.execute(
+        "select count(*) from tool_usage where session_id=? and error_type is not null",
+        (sid,),
+    ).fetchone()
+    err_turns = int(err[0] or 0)
+    err_tools = max(int(err[1] or 0), int(terr[0] or 0))
+    err_retry = int(err[2] or 0)
     # 工具调用明细（tool_usage 表，本会话按工具分组；status=running 的行不计入）
     tool_rows = con.execute(
         """select tool_name, count(*), coalesce(sum(duration_ms),0),
@@ -734,14 +727,17 @@ def _session_snapshot(con, sid, cfg):
         "retries": u["retries"] if u else 0,
         "ctx": u["last_request_input"] if u else 0,
         "updated": (_ts(lr[0]).strftime("%H:%M:%S") if lr and lr[0] else ""),
-        "sub": sub,
+        # 底栏「当前会话错误」用：轮次真报错 + 工具失败 + 模型重试（不含主动中断）
+        "err": {"turns": err_turns, "tools": err_tools, "retries": err_retry,
+                "total": err_turns + err_tools + err_retry},
         "tools": tools,
         "last_turn": lt,
         "last": {
             "duration_ms": last["duration_ms"] if last else 0,
-            "ttft_ms": last[1] if last else 0,
+            "ttft_ms": ttft_ms,
             "model": last["model_id"] if last else "",
             "tps": tps,
+            "tps_gen": tps_gen,
         },
         # 代码变更统计（session 表 summary_* 列，ZCode 目前未填充、全库为 NULL，有值才会显示）
         "code": {
@@ -929,8 +925,9 @@ def snapshot(force_sid=""):
             base = {"sid": "", "title": "", "active": False, "turns": 0, "requests": 0,
                     "input": 0, "output": 0, "reasoning": 0, "cache_read": 0, "cache_write": 0,
                     "total": 0, "tool_calls": 0, "retries": 0, "ctx": 0, "updated": "",
+                    "err": {"turns": 0, "tools": 0, "retries": 0, "total": 0},
                     "last_turn": dict(_EMPTY_TURN),
-                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0},
+                    "last": {"duration_ms": 0, "ttft_ms": 0, "model": "", "tps": 0, "tps_gen": 0},
                     "code": {"add": None, "del": None, "files": None}, "ctx_exc": 0,
                     "tools": {"total": 0, "errors": 0, "list": []},
                     "sub": {"requests": 0, "total": 0, "input": 0, "output": 0, "cache_read": 0,
@@ -967,6 +964,8 @@ def snapshot(force_sid=""):
             "session": base,
             "last_turn": base["last_turn"],
             "last": base["last"],
+            # 底栏「当前会话错误」：顶层也带一份，前端按 d.err 读不必再下钻 session
+            "err": base.get("err", {"turns": 0, "tools": 0, "retries": 0, "total": 0}),
             "today": {
                 "requests": today[0], "input": today[1], "output": today[2],
                 "cache_read": today[3], "total": today[4],
